@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Photo2wire — 写真を針金細工風に</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+</head>
+<body>
+    <!-- ヘッダー -->
+    <header>
+        <h1>Photo2wire</h1>
+        <p class="subtitle">写真を針金細工風の一筆書きに変換</p>
+    </header>
+
+    <!-- ステータス表示 -->
+    <div id="status"></div>
+
+    <!-- ステップ1: 写真を選ぶ -->
+    <section class="card">
+        <h2>ステップ1: 写真を選ぶ</h2>
+        <div id="drop-zone">
+            <p>クリックして写真を選択、またはドラッグ＆ドロップ</p>
+            <input type="file" id="file-input" accept="image/*" style="display:none;">
+        </div>
+    </section>
+
+    <!-- ステップ2: 調整する -->
+    <section class="card">
+        <h2>ステップ2: 調整する</h2>
+
+        <!-- プレビュー2カラム -->
+        <div class="preview-grid">
+            <div class="preview-column">
+                <h3>元写真</h3>
+                <canvas id="canvas-original"></canvas>
+            </div>
+            <div class="preview-column">
+                <h3>変換結果</h3>
+                <div id="svg-container"></div>
+            </div>
+        </div>
+
+        <!-- 調整パネル -->
+        <div class="adjustment-panel">
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="toggle-cutout" checked>
+                    被写体を自動で切り抜く
+                </label>
+            </div>
+
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="toggle-bridges" checked>
+                    つなぎ線を色分け表示
+                </label>
+            </div>
+
+            <div class="slider-row">
+                <label for="slider-simplify">単純化</label>
+                <input type="range" id="slider-simplify" min="1" max="10" step="1" value="5">
+                <span id="val-simplify">5</span>
+            </div>
+
+            <div class="slider-row">
+                <label for="slider-detail">内部線の量</label>
+                <input type="range" id="slider-detail" min="0" max="10" step="1" value="4">
+                <span id="val-detail">4</span>
+            </div>
+
+            <div class="slider-row">
+                <label for="slider-thickness">線の太さ</label>
+                <input type="range" id="slider-thickness" min="1" max="8" step="0.5" value="2.5">
+                <span id="val-thickness">2.5</span>
+            </div>
+
+            <div id="stroke-info"></div>
+        </div>
+    </section>
+
+    <!-- ステップ3: ダウンロード -->
+    <section class="card">
+        <h2>ステップ3: ダウンロード</h2>
+
+        <div class="wire-length-panel">
+            <div class="input-row">
+                <label for="input-width-cm">作品の幅</label>
+                <input type="number" id="input-width-cm" value="15" min="1">
+                <span>cm</span>
+            </div>
+
+            <div class="input-row">
+                <label for="input-margin">余裕率</label>
+                <input type="number" id="input-margin" value="10" min="0">
+                <span>%</span>
+            </div>
+
+            <div class="output-row">
+                <span>必要な針金の長さ:</span>
+                <strong id="wire-length-output">—</strong>
+            </div>
+        </div>
+
+        <div class="button-group">
+            <button id="btn-download-svg">SVGダウンロード</button>
+            <button id="btn-download-png">PNGダウンロード</button>
+            <button id="btn-animate">描き順アニメーション</button>
+        </div>
+    </section>
+
+    <!-- フッター -->
+    <footer>
+        <p>針金細工 八百魚（WIRE WORK YAOUO）</p>
+        <p><a href="https://yaouo.jp" target="_blank" rel="noopener noreferrer">https://yaouo.jp</a></p>
+    </footer>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>
