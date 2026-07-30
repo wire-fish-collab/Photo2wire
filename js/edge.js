@@ -76,35 +76,36 @@ function gaussBlur(src, W, H, kernel) {
 }
 
 /**
- * マスクを3x3正方形構造要素で侵食（erosion）する
+ * マスクを3x3正方形構造要素で膨張（dilation）する
  * @param {Uint8Array} mask
  * @param {number} W
  * @param {number} H
- * @param {number} iterations 侵食の回数
+ * @param {number} iterations 膨張の回数
  * @returns {Uint8Array}
  */
-function erodeMask(mask, W, H, iterations) {
+function dilateMask(mask, W, H, iterations) {
   let src = mask.slice();
-  const dst = new Uint8Array(W * H);
   for (let it = 0; it < iterations; it++) {
+    const dst = new Uint8Array(W * H);
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const i = y * W + x;
-        // 3x3近傍のすべてが255のときのみ255を維持
-        let ok = true;
+        if (src[i]) { dst[i] = 255; continue; }
+        // 3x3近傍にひとつでも255があれば255
+        let hit = false;
         outer: for (let dy = -1; dy <= 1; dy++) {
           for (let dx = -1; dx <= 1; dx++) {
             const ny = y + dy, nx = x + dx;
-            if (ny < 0 || ny >= H || nx < 0 || nx >= W || src[ny * W + nx] === 0) {
-              ok = false;
+            if (ny >= 0 && ny < H && nx >= 0 && nx < W && src[ny * W + nx]) {
+              hit = true;
               break outer;
             }
           }
         }
-        dst[i] = ok ? 255 : 0;
+        if (hit) dst[i] = 255;
       }
     }
-    src = dst.slice();
+    src = dst;
   }
   return src;
 }
@@ -128,13 +129,18 @@ export function detectEdges(imageData, opts = {}) {
   const blur1 = gaussBlur(gray, W, H, k1);
   const blur2 = gaussBlur(gray, W, H, k2);
 
-  // マスクがある場合は3px侵食して有効領域を縮める
-  const eroded = mask ? erodeMask(mask, W, H, 3) : null;
+  // マスクがある場合は「境界から2px以内の帯」だけを無効にする。
+  // マスク全体を侵食すると髪の毛など細い部分が丸ごと消えてしまうため、
+  // 外形線との二重化防止は境界近傍の帯で行う
+  let boundaryBand = null;
+  if (mask) {
+    boundaryBand = maskOutline(mask, W, H);
+    boundaryBand = dilateMask(boundaryBand, W, H, 2);
+  }
 
   const edges = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) {
-    // maskが指定されていて侵食済み領域外の画素は無効
-    if (eroded && eroded[i] === 0) continue;
+    if (mask && (mask[i] === 0 || boundaryBand[i] !== 0)) continue;
     if (blur1[i] - blur2[i] > threshold) {
       edges[i] = 255;
     }

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Photo2wire — 写真を針金細工風に</title>
     <link rel="stylesheet" href="css/style.css">
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.webgpu.min.js"></script>
 </head>
 <body>
     <!-- ヘッダー -->
@@ -56,6 +56,14 @@
                     <input type="checkbox" id="toggle-bridges" checked>
                     つなぎ線を色分け表示
                 </label>
+            </div>
+
+            <div class="control-group">
+                <label for="model-select">切り抜きモデル</label>
+                <select id="model-select">
+                    <option value="u2netp" selected>標準（軽量 4.6MB）</option>
+                    <option value="isnet">高精度（170MB・影の誤判定に強い）</option>
+                </select>
             </div>
 
             <div class="slider-row">

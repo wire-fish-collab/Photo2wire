@@ -14,6 +14,7 @@ const els = {
   canvasOriginal: $('canvas-original'),
   svgContainer: $('svg-container'),
   toggleCutout: $('toggle-cutout'),
+  modelSelect: $('model-select'),
   toggleBridges: $('toggle-bridges'),
   sliderSimplify: $('slider-simplify'),
   sliderDetail: $('slider-detail'),
@@ -80,8 +81,11 @@ async function runSegmentationAndProcess() {
   state.busy = true;
   try {
     if (els.toggleCutout.checked) {
-      setStatus('被写体を判定しています…（初回はモデル読み込みに少し時間がかかります）');
-      state.mask = await segmentSubject(state.canvas);
+      const model = els.modelSelect.value;
+      setStatus(model === 'isnet'
+        ? '被写体を判定しています…（高精度モデル。初回は170MBの読み込みと数十秒の処理があります）'
+        : '被写体を判定しています…（初回はモデル読み込みに少し時間がかかります）');
+      state.mask = await segmentSubject(state.canvas, model);
     } else {
       state.mask = null;
     }
@@ -102,7 +106,7 @@ function params() {
   const thickness = Number(els.sliderThickness.value); // 1..8
   return {
     epsilon: 0.6 * simplify,
-    minLength: 10 + simplify * 3,
+    minLength: 6 + simplify * 2,
     snapRadius: 4 + simplify,
     smoothing: 2,
     dogThreshold: 10 - detail * 0.9, // 小さいほど内部線が増える
@@ -216,6 +220,7 @@ function init() {
   els.sliderThickness.addEventListener('input', () => { updateSliderLabels(); redrawSVG(); });
   els.toggleBridges.addEventListener('change', redrawSVG);
   els.toggleCutout.addEventListener('change', runSegmentationAndProcess);
+  els.modelSelect.addEventListener('change', runSegmentationAndProcess);
   els.inputWidthCm.addEventListener('input', updateWireLength);
   els.inputMargin.addEventListener('input', updateWireLength);
 

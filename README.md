@@ -29,30 +29,34 @@ Photo2wireは、通常の写真をシンプルな一筆書き線画に変換し�
 ## 処理の流れ
 
 1. **被写体自動切り抜き** (オプション)
-   - onnxruntime-web + U2-Netp画像セグメンテーションモデルで背景を除去
+   - onnxruntime-web ＋ セグメンテーションモデルで背景を除去
+   - モデルは2種類から選択: 標準 U2-Netp（4.6MB・軽量）/ 高精度 ISNet（170MB・影の誤判定に強い）
+   - 高精度モデルは初回のみダウンロードし、Cache Storage に保存して再利用
+   - 小さな穴だけを塗りつぶし、脚の間などの「隙間」は被写体の形として残す
 
 2. **エッジ検出**
-   - Difference of Gaussians (DoG) フィルタで線を抽出
+   - Difference of Gaussians (DoG) フィルタで内部の特徴線を抽出
+   - マスク境界の2px帯のみ除外し、髪の毛など細い部分は保持
 
 3. **細線化・ベクター化**
-   - 細線化処理で線を1ピクセル幅に
+   - Zhang-Suen細線化で線を1ピクセル幅に
    - 端点・分岐点を検出し線分を抽出
    - Douglas-Peucker単純化でポイント数を削減
 
-4. **一筆書き化**
-   - 複数の線分を貪欲法で連結
-   - つなぎ線を最小化
-   - 2-opt最適化で順序を改善
+4. **一筆書き化（グラフ＋中国人郵便配達方式）**
+   - 線分群をグラフ化し、内部線の端点は最寄りの輪郭線へ垂線で接続
+   - 奇数次数の頂点をペアリングし、最短経路を「往復（二重）」化
+   - Hierholzer法でオイラー路を求め、1本の連続した線に
 
 5. **スムージング**
    - Chaikinアルゴリズムで滑らかな曲線に
 
 6. **SVG出力**
-   - 線の順序情報を保持したSVG形式で生成
+   - 線の順序情報を保持したSVG形式で生成。接続線・往復区間は色分け表示可能
 
 ## 機能
 
-- **被写体自動切り抜き**: AI (U2-Netp) により背景を自動除去
+- **被写体自動切り抜き**: AI（U2-Netp / ISNet 選択式）により背景を自動除去
 - **完全な一筆書き**: つなぎ線を最小化し、1本の連続線で描けるように最適化
 - **パラメータ調整**: 単純化度、内部線の量、線の太さをリアルタイムで調整
 - **針金必要長の計算**: 作品の実寸 (cm) を指定し、必要な針金の長さを自動計算
@@ -66,17 +70,18 @@ Photo2wireは、通常の写真をシンプルな一筆書き線画に変換し�
 - **HTML / CSS / JavaScript (vanilla)**
   - ビルドツール不要、CDNのみで動作
 
-- **onnxruntime-web** (v1.19.2)
-  - ブラウザ上で機械学習モデルを実行
+- **onnxruntime-web** (v1.22.0)
+  - ブラウザ上で機械学習モデルを実行（WebGPU→wasm自動フォールバック）
 
-- **U2-Netp** (Apache 2.0 ライセンス)
-  - セグメンテーションモデル、models/u2netp.onnx に同梱
+- **U2-Netp / ISNet** (いずれも Apache 2.0 ライセンス)
+  - セグメンテーションモデル、models/ に同梱
 
 - **Image Processing Algorithms**
   - DoG (Difference of Gaussians) エッジ検出
-  - Skeletonization (細線化)
+  - Zhang-Suen 細線化
   - Douglas-Peucker 単純化
-  - 2-opt 巡回セールスマン問題最適化
+  - 中国人郵便配達問題（奇数次数ペアリング＋経路二重化）
+  - Hierholzer オイラー路探索
   - Chaikin スムージング
 
 ## ディレクトリ構成
@@ -87,15 +92,15 @@ Photo2wire/
 ├── css/
 │   └── style.css       # スタイルシート
 ├── js/
-│   ├── main.js         # エントリーポイント
-│   ├── imageProcessor.js
-│   ├── edgeDetection.js
-│   ├── vectorization.js
-│   ├── lineSolver.js
-│   ├── svgExport.js
-│   └── ...
+│   ├── main.js         # UI制御・パイプライン統括
+│   ├── segment.js      # AI被写体切り抜き
+│   ├── edge.js         # DoGエッジ検出
+│   ├── vectorize.js    # 細線化・ベクター化
+│   ├── onestroke.js    # 一筆書き化
+│   └── render.js       # SVG/PNG出力・アニメーション
 ├── models/
-│   └── u2netp.onnx     # U2-Netp セグメンテーションモデル
+│   ├── u2netp.onnx                    # 標準モデル（4.6MB）
+│   └── isnet-general-use.onnx.part*  # 高精度モデル（170MB、2分割）
 ├── serve.py            # 開発サーバー
 └── README.md          # このファイル
 ```
