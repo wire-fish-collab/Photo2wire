@@ -23,10 +23,15 @@ const MODELS = {
   },
 };
 
+// WebGPU が一度失敗したら以後は wasm を使う（無駄な再試行と
+// 失敗セッションのメモリ滞留を防ぐ）。depth.js とも共有する
+let preferredEP = 'webgpu';
+export function getPreferredEP() { return preferredEP; }
+export function notePreferWasm() { preferredEP = 'wasm'; }
+
 // モデルを取得して Uint8Array で返す。分割ファイルは結合し、
 // Cache Storage に保存して再訪時の再ダウンロードを防ぐ
-async function fetchModelBuffer(name) {
-  const urls = MODELS[name].parts ?? [MODELS[name].url];
+export async function fetchBuffers(urls) {
   let cache = null;
   try {
     cache = await caches.open('photo2wire-models');
@@ -52,11 +57,12 @@ async function fetchModelBuffer(name) {
 
 const sessions = new Map(); // `${name}:${ep}` -> Promise<InferenceSession>
 
-export function loadModel(name = 'u2netp', ep = 'webgpu') {
+export function loadModel(name = 'u2netp', ep = preferredEP) {
   const key = `${name}:${ep}`;
   if (!sessions.has(key)) {
     ort.env.wasm.wasmPaths = ORT_CDN;
-    sessions.set(key, fetchModelBuffer(name).then((buf) =>
+    const urls = MODELS[name].parts ?? [MODELS[name].url];
+    sessions.set(key, fetchBuffers(urls).then((buf) =>
       ort.InferenceSession.create(buf, { executionProviders: [ep] })
     ));
   }
@@ -71,6 +77,10 @@ async function runWithFallback(modelName, session, tensor) {
     return results[session.outputNames[0]].data;
   } catch (e) {
     console.warn(`webgpu実行に失敗、wasmで再試行します: ${e.message}`);
+    notePreferWasm();
+    // 失敗した webgpu セッションは解放してメモリ滞留を防ぐ
+    try { session.release(); } catch (_) { /* 解放失敗は無視 */ }
+    sessions.delete(`${modelName}:webgpu`);
     const s = await loadModel(modelName, 'wasm');
     const results = await s.run({ [s.inputNames[0]]: tensor });
     return results[s.outputNames[0]].data;
@@ -82,8 +92,9 @@ export async function segmentSubject(srcCanvas, modelName = 'u2netp') {
   const model = MODELS[modelName] ?? MODELS.u2netp;
   let session;
   try {
-    session = await loadModel(modelName, 'webgpu');
+    session = await loadModel(modelName, preferredEP);
   } catch (e) {
+    notePreferWasm();
     session = await loadModel(modelName, 'wasm');
   }
   const W = srcCanvas.width, H = srcCanvas.height;

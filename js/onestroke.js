@@ -58,12 +58,16 @@ class StrokeGraph {
     return this.verts.length - 1;
   }
 
-  addEdge(u, v, pts, kind = 'line') {
-    // 幾何の端点を頂点座標に一致させて連続性を保証する
+  // 幾何の端点を頂点座標に一致させて連続性を保証する
+  makeEdge(u, v, pts, kind = 'line') {
     const g = pts.map((p) => [p[0], p[1]]);
     g[0] = [this.verts[u][0], this.verts[u][1]];
     g[g.length - 1] = [this.verts[v][0], this.verts[v][1]];
-    this.edges.push({ u, v, pts: g, len: pathLength(g), kind });
+    return { u, v, pts: g, len: pathLength(g), kind };
+  }
+
+  addEdge(u, v, pts, kind = 'line') {
+    this.edges.push(this.makeEdge(u, v, pts, kind));
   }
 
   addPolyline(pts) {
@@ -94,7 +98,8 @@ class StrokeGraph {
   }
 
   // 辺 ei を線分 seg 上の位置 t で分割し、分割点の頂点番号を返す。
-  // 分割点が辺の端に十分近い場合は分割せず既存の端点を返す
+  // 分割点が辺の端に十分近い場合は分割せず既存の端点を返す。
+  // 既存の辺番号がずれないよう、前半は ei の位置に置き換え、後半を末尾に追加する
   splitEdge(ei, seg, t, q) {
     const e = this.edges[ei];
     if (dist(q, this.verts[e.u]) <= this.snapRadius) return e.u;
@@ -103,11 +108,8 @@ class StrokeGraph {
     const w = this.verts.length - 1;
     const ptsA = e.pts.slice(0, seg + 1).concat([[q[0], q[1]]]);
     const ptsB = [[q[0], q[1]]].concat(e.pts.slice(seg + 1));
-    const kind = e.kind;
-    const u = e.u, v = e.v;
-    this.edges.splice(ei, 1);
-    this.addEdge(u, w, ptsA, kind);
-    this.addEdge(w, v, ptsB, kind);
+    this.edges[ei] = this.makeEdge(e.u, w, ptsA, e.kind);
+    this.edges.push(this.makeEdge(w, e.v, ptsB, e.kind));
     return w;
   }
 
@@ -149,51 +151,65 @@ class StrokeGraph {
     return comp;
   }
 
-  // 連結成分が複数あれば、最も近い点同士を接続線で結んで1つにする
+  // 連結成分が複数あれば、近い点同士を接続線で結んで1つにする。
+  // 最大成分を核として、他の成分を「核へ最も近い点」で順に併合していく。
+  // 総当たりだと成分が多いとき O(n^2) で固まるため、空間グリッドで近傍探索する
   connectComponents() {
-    for (;;) {
-      const comp = this.components();
-      const used = new Set(this.edges.flatMap((e) => [comp[e.u], comp[e.v]]));
-      const roots = [...used];
-      if (roots.length <= 1) return;
+    const comp = this.components();
+    const roots = [...new Set(this.edges.flatMap((e) => [comp[e.u], comp[e.v]]))];
+    if (roots.length <= 1) return;
 
-      // 成分ごとに辺上のサンプル点を集める（約12px間隔）
-      const samples = new Map(); // root -> [{p, ei, seg, t}]
-      for (let ei = 0; ei < this.edges.length; ei++) {
-        const e = this.edges[ei];
-        const root = comp[e.u];
-        if (!samples.has(root)) samples.set(root, []);
-        const list = samples.get(root);
-        for (let i = 0; i < e.pts.length - 1; i++) {
-          const a = e.pts[i], b = e.pts[i + 1];
-          const segLen = dist(a, b);
-          const steps = Math.max(1, Math.round(segLen / 12));
-          for (let s = 0; s <= steps; s++) {
-            const t = s / steps;
-            list.push({ p: [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], ei, seg: i, t });
-          }
+    // 成分ごとに辺上のサンプル点を集める（約12px間隔）
+    const samples = new Map(); // root -> [{p, ei, seg, t}]
+    for (let ei = 0; ei < this.edges.length; ei++) {
+      const e = this.edges[ei];
+      const root = comp[e.u];
+      if (!samples.has(root)) samples.set(root, []);
+      const list = samples.get(root);
+      for (let i = 0; i < e.pts.length - 1; i++) {
+        const a = e.pts[i], b = e.pts[i + 1];
+        const steps = Math.max(1, Math.round(dist(a, b) / 12));
+        for (let s = 0; s <= steps; s++) {
+          const t = s / steps;
+          list.push({ p: [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], ei, seg: i, t });
         }
       }
+    }
 
-      // 最大成分と、それに最も近い成分ペアを結ぶ
-      const main = roots.reduce((a, b) =>
-        (samples.get(a)?.length || 0) >= (samples.get(b)?.length || 0) ? a : b);
+    // 核 = 最大成分。他は大きい順に核へ繋ぐ
+    roots.sort((a, b) => (samples.get(b)?.length || 0) - (samples.get(a)?.length || 0));
+    const main = roots[0];
+    const grid = new SampleGrid(48);
+    for (const s of samples.get(main)) grid.add(s);
+
+    // splitEdge で辺番号が変わるため、split 済み辺のサンプルは座標だけ頼りに
+    // 引き直す必要がある。単純化のため「分割の影響を受けた辺のサンプル」は
+    // 近傍探索の候補から除き、接続点は splitEdge が返す頂点を使う
+    const staleEdges = new Set();
+
+    for (let r = 1; r < roots.length; r++) {
+      const list = samples.get(roots[r]) || [];
+      if (list.length === 0) continue;
+      // この成分の各サンプルから核グリッドへの最近傍を探す
       let best = null;
-      for (const root of roots) {
-        if (root === main) continue;
-        for (const sa of samples.get(main)) {
-          for (const sb of samples.get(root)) {
-            const d = dist(sa.p, sb.p);
-            if (!best || d < best.d) best = { d, sa, sb };
-          }
-        }
+      for (const sb of list) {
+        const near = grid.nearest(sb.p, staleEdges);
+        if (near && (!best || near.d < best.d)) best = { d: near.d, sa: near.s, sb };
       }
-      if (!best) return;
-      // 分割は ei の大きい方から行う（splice でインデックスがずれないように）
+      if (!best) continue;
+
       const pair = [best.sa, best.sb].sort((a, b) => b.ei - a.ei);
+      const before = this.edges.length;
       const w1 = this.splitEdge(pair[0].ei, pair[0].seg, pair[0].t, pair[0].p);
       const w2 = this.splitEdge(pair[1].ei, pair[1].seg, pair[1].t, pair[1].p);
+      if (this.edges.length !== before) {
+        staleEdges.add(pair[0].ei);
+        staleEdges.add(pair[1].ei);
+      }
       if (w1 !== w2) this.addEdge(w1, w2, [this.verts[w1], this.verts[w2]], 'connector');
+      // 併合した成分のサンプルも核グリッドへ（辺番号が古い可能性があるため
+      // 頂点座標としてのみ使う。ei は split の影響がなければそのまま有効）
+      for (const s of list) grid.add(s);
     }
   }
 
@@ -227,7 +243,7 @@ class StrokeGraph {
     return adj;
   }
 
-  // src から全頂点への最短経路（距離と直前辺）
+  // src から全頂点への最短経路（距離と直前辺）。二分ヒープで O(E log V)
   dijkstra(src, adj) {
     const n = this.verts.length;
     const distArr = new Array(n).fill(Infinity);
@@ -235,19 +251,19 @@ class StrokeGraph {
     const prevVert = new Array(n).fill(-1);
     const visited = new Array(n).fill(false);
     distArr[src] = 0;
-    for (;;) {
-      let u = -1, dmin = Infinity;
-      for (let i = 0; i < n; i++) {
-        if (!visited[i] && distArr[i] < dmin) { dmin = distArr[i]; u = i; }
-      }
-      if (u === -1) break;
+    const heap = new MinHeap();
+    heap.push(0, src);
+    while (heap.size > 0) {
+      const [d, u] = heap.pop();
+      if (visited[u]) continue;
       visited[u] = true;
       for (const { ei, other } of adj[u]) {
-        const nd = distArr[u] + this.edges[ei].len;
+        const nd = d + this.edges[ei].len;
         if (nd < distArr[other]) {
           distArr[other] = nd;
           prevEdge[other] = ei;
           prevVert[other] = u;
+          heap.push(nd, other);
         }
       }
     }
@@ -273,19 +289,22 @@ class StrokeGraph {
         if (!far || d > far.d) far = { d, a: odd[i], b: odd[j] };
       }
     }
-    let rest = odd.filter((o) => o !== far.a && o !== far.b);
+    const rest = odd.filter((o) => o !== far.a && o !== far.b);
 
-    // 残りを貪欲に最短距離ペアでマッチングし、経路を二重化
-    while (rest.length > 0) {
-      let best = null;
-      for (let i = 0; i < rest.length; i++) {
-        for (let j = i + 1; j < rest.length; j++) {
-          const d = sp.get(rest[i]).dist[rest[j]];
-          if (!best || d < best.d) best = { d, i, j };
-        }
+    // 全ペアを距離昇順に並べ、未使用同士のペアから順に採用する
+    // （毎回全ペアを走査し直す方式は頂点数の3乗になり固まるため）
+    const pairs = [];
+    for (let i = 0; i < rest.length; i++) {
+      for (let j = i + 1; j < rest.length; j++) {
+        pairs.push([sp.get(rest[i]).dist[rest[j]], rest[i], rest[j]]);
       }
-      const a = rest[best.i], b = rest[best.j];
-      rest = rest.filter((_, idx) => idx !== best.i && idx !== best.j);
+    }
+    pairs.sort((a, b) => a[0] - b[0]);
+    const used = new Set();
+    for (const [, a, b] of pairs) {
+      if (used.has(a) || used.has(b)) continue;
+      used.add(a);
+      used.add(b);
       // a→b の最短経路を復元して二重化（retrace）
       const { prevEdge, prevVert } = sp.get(a);
       let cur = b;
@@ -353,5 +372,80 @@ class StrokeGraph {
       if (bridge) bridgeLengthPx += e.len;
     }
     return { segments, totalLengthPx, bridgeLengthPx };
+  }
+}
+
+// 二分ヒープ（キー昇順）
+class MinHeap {
+  constructor() { this.k = []; this.v = []; }
+  get size() { return this.k.length; }
+  push(key, val) {
+    const k = this.k, v = this.v;
+    k.push(key); v.push(val);
+    let i = k.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (k[p] <= k[i]) break;
+      [k[p], k[i]] = [k[i], k[p]];
+      [v[p], v[i]] = [v[i], v[p]];
+      i = p;
+    }
+  }
+  pop() {
+    const k = this.k, v = this.v;
+    const top = [k[0], v[0]];
+    const lk = k.pop(), lv = v.pop();
+    if (k.length > 0) {
+      k[0] = lk; v[0] = lv;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < k.length && k[l] < k[m]) m = l;
+        if (r < k.length && k[r] < k[m]) m = r;
+        if (m === i) break;
+        [k[m], k[i]] = [k[i], k[m]];
+        [v[m], v[i]] = [v[i], v[m]];
+        i = m;
+      }
+    }
+    return top;
+  }
+}
+
+// サンプル点の近傍探索用グリッド（セル単位のリング拡張探索）
+class SampleGrid {
+  constructor(cellSize) {
+    this.cell = cellSize;
+    this.map = new Map(); // "cx,cy" -> sample[]
+  }
+  add(s) {
+    const key = `${Math.floor(s.p[0] / this.cell)},${Math.floor(s.p[1] / this.cell)}`;
+    if (!this.map.has(key)) this.map.set(key, []);
+    this.map.get(key).push(s);
+  }
+  // p に最も近いサンプルを返す（staleEdges に含まれる辺のサンプルは除外）
+  nearest(p, staleEdges) {
+    if (this.map.size === 0) return null;
+    const cx = Math.floor(p[0] / this.cell);
+    const cy = Math.floor(p[1] / this.cell);
+    let best = null;
+    for (let r = 0; r <= 64; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // リング上のみ
+          const bucket = this.map.get(`${cx + dx},${cy + dy}`);
+          if (!bucket) continue;
+          for (const s of bucket) {
+            if (staleEdges && staleEdges.has(s.ei)) continue;
+            const d = Math.hypot(s.p[0] - p[0], s.p[1] - p[1]);
+            if (!best || d < best.d) best = { d, s };
+          }
+        }
+      }
+      // これより外のリングに、今の最良より近い点は存在しない
+      if (best && best.d <= r * this.cell) break;
+    }
+    return best;
   }
 }

@@ -83,7 +83,7 @@ function gaussBlur(src, W, H, kernel) {
  * @param {number} iterations 膨張の回数
  * @returns {Uint8Array}
  */
-function dilateMask(mask, W, H, iterations) {
+export function dilateMask(mask, W, H, iterations) {
   let src = mask.slice();
   for (let it = 0; it < iterations; it++) {
     const dst = new Uint8Array(W * H);
@@ -138,11 +138,25 @@ export function detectEdges(imageData, opts = {}) {
     boundaryBand = dilateMask(boundaryBand, W, H, 2);
   }
 
-  const edges = new Uint8Array(W * H);
+  // dog 配列を計算
+  const dog = new Float32Array(W * H);
   for (let i = 0; i < W * H; i++) {
-    if (mask && (mask[i] === 0 || boundaryBand[i] !== 0)) continue;
-    if (blur1[i] - blur2[i] > threshold) {
-      edges[i] = 255;
+    dog[i] = blur1[i] - blur2[i];
+  }
+
+  const edges = new Uint8Array(W * H);
+  // 画像端（x=0, x=W-1, y=0, y=H-1）は除外して内側のみ処理
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      if (mask && (mask[i] === 0 || boundaryBand[i] !== 0)) continue;
+      if (dog[i] <= threshold) continue;
+      // 非最大抑制: 水平方向または垂直方向の局所最大であること
+      const isHorizMax = dog[i] >= dog[i - 1] && dog[i] >= dog[i + 1];
+      const isVertMax  = dog[i] >= dog[i - W] && dog[i] >= dog[i + W];
+      if (isHorizMax || isVertMax) {
+        edges[i] = 255;
+      }
     }
   }
   return edges;

@@ -66,6 +66,22 @@
                 </select>
             </div>
 
+            <div class="control-group">
+                <label for="detail-mode">内部線の抽出方式</label>
+                <select id="detail-mode">
+                    <option value="poster" selected>色の境界（ポスタリゼーション）</option>
+                    <option value="dog">明暗の境界（DoG）</option>
+                    <option value="both">両方</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>
+                    <input type="checkbox" id="toggle-depth">
+                    立体の境界を追加（奥行き推定・初回27MB）
+                </label>
+            </div>
+
             <div class="slider-row">
                 <label for="slider-simplify">単純化</label>
                 <input type="range" id="slider-simplify" min="1" max="10" step="1" value="5">

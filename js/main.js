@@ -1,6 +1,8 @@
 // main.js — UI制御・パイプライン統括
 import { loadModel, segmentSubject } from './segment.js';
 import { detectEdges, maskOutline } from './edge.js';
+import { posterizeEdges } from './posterize.js';
+import { computeDepth, depthEdges } from './depth.js';
 import { vectorize } from './vectorize.js';
 import { makeOneStroke } from './onestroke.js';
 import { buildSVG, downloadText, svgToPngBlob, animate } from './render.js';
@@ -15,6 +17,8 @@ const els = {
   svgContainer: $('svg-container'),
   toggleCutout: $('toggle-cutout'),
   modelSelect: $('model-select'),
+  detailMode: $('detail-mode'),
+  toggleDepth: $('toggle-depth'),
   toggleBridges: $('toggle-bridges'),
   sliderSimplify: $('slider-simplify'),
   sliderDetail: $('slider-detail'),
@@ -36,6 +40,7 @@ const state = {
   canvas: null,      // 作業キャンバス（長辺 MAX_SIDE 以下）
   imageData: null,
   mask: null,        // Uint8Array | null
+  depth: null,       // Float32Array | null（画像ごとに1回だけ計算）
   stroke: null,      // makeOneStroke の結果
   svg: '',
   busy: false,
@@ -65,6 +70,7 @@ function acceptFile(file) {
     canvas.getContext('2d').drawImage(img, 0, 0, W, H);
     state.canvas = canvas;
     state.imageData = canvas.getContext('2d').getImageData(0, 0, W, H);
+    state.depth = null;
 
     els.canvasOriginal.width = W;
     els.canvasOriginal.height = H;
@@ -89,12 +95,26 @@ async function runSegmentationAndProcess() {
     } else {
       state.mask = null;
     }
+    await ensureDepth();
     reprocess();
   } catch (e) {
     console.error(e);
     setStatus('被写体判定に失敗しました。「切り抜き」をオフにして試してください', true);
   } finally {
     state.busy = false;
+  }
+}
+
+// 奥行きマップは画像ごとに1回だけ計算してキャッシュする
+async function ensureDepth() {
+  if (!els.toggleDepth.checked || state.depth || !state.canvas) return;
+  setStatus('奥行きを推定しています…（初回は27MBの読み込みがあります）');
+  try {
+    state.depth = await computeDepth(state.canvas);
+  } catch (e) {
+    console.error(e);
+    setStatus('奥行き推定に失敗しました。「立体の境界」をオフにして続行します', true);
+    els.toggleDepth.checked = false;
   }
 }
 
@@ -110,6 +130,7 @@ function params() {
     snapRadius: 4 + simplify,
     smoothing: 2,
     dogThreshold: 10 - detail * 0.9, // 小さいほど内部線が増える
+    posterLevels: Math.min(8, 2 + Math.round(detail * 0.6)), // 色数 2〜8
     detail,
     thickness,
   };
@@ -121,26 +142,50 @@ function reprocess() {
   const p = params();
   const { width: W, height: H } = state.imageData;
 
-  let edges;
-  if (p.detail > 0) {
-    edges = detectEdges(state.imageData, {
+  const edges = new Uint8Array(W * H);
+  const mode = els.detailMode.value; // 'poster' | 'dog' | 'both'
+  if (p.detail > 0 && (mode === 'dog' || mode === 'both')) {
+    const dog = detectEdges(state.imageData, {
       sigma: 1.4,
       k: 1.6,
       threshold: p.dogThreshold,
       mask: state.mask,
     });
-  } else {
-    edges = new Uint8Array(W * H); // 輪郭のみモード
+    for (let i = 0; i < edges.length; i++) if (dog[i]) edges[i] = 255;
+  }
+  if (p.detail > 0 && (mode === 'poster' || mode === 'both')) {
+    const poster = posterizeEdges(state.imageData, {
+      levels: p.posterLevels,
+      mask: state.mask,
+    });
+    for (let i = 0; i < edges.length; i++) if (poster[i]) edges[i] = 255;
+  }
+  if (els.toggleDepth.checked && state.depth) {
+    const dep = depthEdges(state.depth, W, H, { threshold: 0.04, mask: state.mask });
+    for (let i = 0; i < edges.length; i++) if (dep[i]) edges[i] = 255;
   }
   if (state.mask) {
     const outline = maskOutline(state.mask, W, H);
     for (let i = 0; i < edges.length; i++) if (outline[i]) edges[i] = 255;
   }
 
-  const polylines = vectorize(edges, W, H, {
+  let polylines = vectorize(edges, W, H, {
     epsilon: p.epsilon,
     minLength: p.minLength,
   });
+  // 線が多すぎると一筆書き計算が破綻する（し、下絵としても使えない）ため、
+  // 長い順に上限本数まで絞る
+  const MAX_LINES = 400;
+  const totalFound = polylines.length;
+  if (polylines.length > MAX_LINES) {
+    const len = (pts) => {
+      let l = 0;
+      for (let i = 1; i < pts.length; i++) l += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+      return l;
+    };
+    polylines.sort((a, b) => len(b) - len(a));
+    polylines = polylines.slice(0, MAX_LINES);
+  }
   if (polylines.length === 0) {
     setStatus('線が検出できませんでした。「内部線の量」を上げるか「単純化」を下げてください', true);
     els.svgContainer.innerHTML = '';
@@ -155,8 +200,11 @@ function reprocess() {
   updateWireLength();
 
   const nBridges = state.stroke.segments.filter((s) => s.bridge).length;
+  const capNote = totalFound > polylines.length
+    ? `検出線 ${totalFound} 本から長い順に ${polylines.length} 本を使用`
+    : `検出線 ${polylines.length} 本`;
   els.strokeInfo.textContent =
-    `検出線 ${polylines.length} 本 → 一筆書き（つなぎ ${nBridges} 箇所） / 処理 ${Math.round(performance.now() - t0)}ms`;
+    `${capNote} → 一筆書き（つなぎ ${nBridges} 箇所） / 処理 ${Math.round(performance.now() - t0)}ms`;
   setStatus('変換完了。スライダーで調整できます');
 }
 
@@ -221,6 +269,11 @@ function init() {
   els.toggleBridges.addEventListener('change', redrawSVG);
   els.toggleCutout.addEventListener('change', runSegmentationAndProcess);
   els.modelSelect.addEventListener('change', runSegmentationAndProcess);
+  els.detailMode.addEventListener('change', reprocess);
+  els.toggleDepth.addEventListener('change', async () => {
+    await ensureDepth();
+    reprocess();
+  });
   els.inputWidthCm.addEventListener('input', updateWireLength);
   els.inputMargin.addEventListener('input', updateWireLength);
 
