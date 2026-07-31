@@ -291,6 +291,14 @@ class StrokeGraph {
       if (used.has(a) || used.has(b)) continue;
       used.add(a);
       used.add(b);
+      // 針金を節約するため、長い経路を往復（二重化）するより
+      // 2点を直接短い直線で結ぶ方が十分短ければそちらを選ぶ
+      const dPath = sp.get(a).dist[b];
+      const dLine = dist(this.verts[a], this.verts[b]);
+      if (dLine < dPath * 0.7) {
+        this.addEdge(a, b, [this.verts[a], this.verts[b]], 'connector');
+        continue;
+      }
       // a→b の最短経路を復元して二重化（retrace）
       const { prevEdge, prevVert } = sp.get(a);
       let cur = b;

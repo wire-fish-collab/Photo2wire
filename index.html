@@ -33,7 +33,12 @@
         <!-- プレビュー2カラム -->
         <div class="preview-grid">
             <div class="preview-column">
-                <h3>元写真</h3>
+                <h3>元写真
+                    <label class="inline-toggle">
+                        <input type="checkbox" id="toggle-bin-preview" checked>
+                        白黒2色で表示
+                    </label>
+                </h3>
                 <canvas id="canvas-original"></canvas>
             </div>
             <div class="preview-column">
@@ -76,8 +81,8 @@
 
             <div class="control-group">
                 <label>
-                    <input type="checkbox" id="toggle-bin-preview" checked>
-                    左に白黒2色のプレビューを表示
+                    <input type="checkbox" id="toggle-depth">
+                    立体の境界を追加（奥行き推定・初回27MB）
                 </label>
             </div>
 

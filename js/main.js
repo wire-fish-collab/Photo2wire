@@ -3,6 +3,8 @@ import { loadModel, segmentSubject } from './segment.js';
 import { maskOutline, dilateMask } from './edge.js';
 import { binarize } from './threshold.js';
 import { traceContours } from './contour.js';
+import { computeDepth, depthEdges } from './depth.js';
+import { vectorize } from './vectorize.js';
 import { makeOneStroke } from './onestroke.js';
 import { buildSVG, buildAnimatedSVG, downloadText, svgToPngBlob, animate } from './render.js';
 
@@ -17,6 +19,7 @@ const els = {
   toggleCutout: $('toggle-cutout'),
   modelSelect: $('model-select'),
   photoMode: $('photo-mode'),
+  toggleDepth: $('toggle-depth'),
   toggleBinPreview: $('toggle-bin-preview'),
   toggleBridges: $('toggle-bridges'),
   sliderThreshold: $('slider-threshold'),
@@ -41,10 +44,18 @@ const state = {
   imageData: null,
   mask: null,        // Uint8Array | null
   bin: null,         // 二値化マップ（プレビュー用に保持）
+  depth: null,       // 奥行きマップ（画像ごとに1回だけ計算）
   stroke: null,      // makeOneStroke の結果
   svg: '',
   busy: false,
+  lastProcessMs: 0,  // 前回の処理時間（スピナー表示の判断に使う）
 };
+
+// 処理中スピナー（transformのCSSアニメーションなので重い処理中も回り続ける）
+function showSpinner() {
+  els.svgContainer.innerHTML =
+    '<div class="spinner-wrap"><div class="spinner"></div><p>処理中…</p></div>';
+}
 
 function setStatus(msg, isError = false) {
   els.status.textContent = msg;
@@ -71,12 +82,17 @@ function acceptFile(file) {
     state.canvas = canvas;
     state.imageData = canvas.getContext('2d').getImageData(0, 0, W, H);
     state.bin = null;
+    state.depth = null;
+    state.stroke = null;
+    state.svg = '';
 
+    // 古い結果を消し、新しい写真をそのまま表示してスピナーを出す
     els.canvasOriginal.width = W;
     els.canvasOriginal.height = H;
     els.canvasOriginal.getContext('2d').drawImage(canvas, 0, 0);
-
-    runSegmentationAndProcess();
+    showSpinner();
+    // スピナーが描画されてから重い処理を始める
+    setTimeout(runSegmentationAndProcess, 40);
   };
   img.onerror = () => setStatus('画像を読み込めませんでした', true);
   img.src = URL.createObjectURL(file);
@@ -95,12 +111,27 @@ async function runSegmentationAndProcess() {
     } else {
       state.mask = null;
     }
+    await ensureDepth();
     reprocess();
   } catch (e) {
     console.error(e);
     setStatus('被写体判定に失敗しました。「切り抜き」をオフにして試してください', true);
   } finally {
     state.busy = false;
+  }
+}
+
+// 奥行きマップは画像ごとに1回だけ計算してキャッシュする
+async function ensureDepth() {
+  if (!els.toggleDepth.checked || state.depth || !state.canvas) return;
+  showSpinner();
+  setStatus('奥行きを推定しています…（初回は27MBの読み込みがあります）');
+  try {
+    state.depth = await computeDepth(state.canvas);
+  } catch (e) {
+    console.error(e);
+    setStatus('奥行き推定に失敗しました。「立体の境界」をオフにして続行します', true);
+    els.toggleDepth.checked = false;
   }
 }
 
@@ -121,7 +152,18 @@ function params() {
   };
 }
 
+// 前回の処理が重かった場合はスピナーを描画してから実行する
 function reprocess() {
+  if (!state.imageData) return;
+  if (state.lastProcessMs > 300) {
+    showSpinner();
+    setTimeout(doProcess, 40);
+  } else {
+    doProcess();
+  }
+}
+
+function doProcess() {
   if (!state.imageData) return;
   const t0 = performance.now();
   const p = params();
@@ -152,6 +194,15 @@ function reprocess() {
     minPerimeter: p.minPerimeter,
     clipBand,
   }));
+  // 立体の境界（奥行きが急に変わる線）を追加の線として合流させる。
+  // 端点は一筆書き化の段階で近くの線に接続される
+  if (els.toggleDepth.checked && state.depth) {
+    const dep = depthEdges(state.depth, W, H, { threshold: 0.04, mask: state.mask });
+    polylines.push(...vectorize(dep, W, H, {
+      epsilon: 0.5 + Math.sqrt(p.epsilonArea),
+      minLength: p.minPerimeter,
+    }));
+  }
   // 線が多すぎると一筆書き計算が破綻する（し、下絵としても使えない）ため、
   // 長い順に上限本数まで絞る
   const MAX_LINES = 400;
@@ -182,8 +233,9 @@ function reprocess() {
   const capNote = totalFound > polylines.length
     ? `検出線 ${totalFound} 本から長い順に ${polylines.length} 本を使用`
     : `検出線 ${polylines.length} 本`;
+  state.lastProcessMs = performance.now() - t0;
   els.strokeInfo.textContent =
-    `${capNote} → 一筆書き（つなぎ ${nBridges} 箇所） / 処理 ${Math.round(performance.now() - t0)}ms`;
+    `${capNote} → 一筆書き（つなぎ ${nBridges} 箇所） / 処理 ${Math.round(state.lastProcessMs)}ms`;
   setStatus('変換完了。スライダーで調整できます');
 }
 
@@ -271,6 +323,10 @@ function init() {
   els.toggleCutout.addEventListener('change', runSegmentationAndProcess);
   els.modelSelect.addEventListener('change', runSegmentationAndProcess);
   els.photoMode.addEventListener('change', reprocess);
+  els.toggleDepth.addEventListener('change', async () => {
+    await ensureDepth();
+    reprocess();
+  });
   els.toggleBinPreview.addEventListener('change', drawBinPreview);
   els.inputWidthCm.addEventListener('input', updateWireLength);
   els.inputMargin.addEventListener('input', updateWireLength);
