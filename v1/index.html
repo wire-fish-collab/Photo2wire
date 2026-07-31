@@ -37,7 +37,7 @@
                 <canvas id="canvas-original"></canvas>
             </div>
             <div class="preview-column">
-                <h3>変換結果 <button id="btn-animate" class="small-btn">描き順を再生</button></h3>
+                <h3>変換結果</h3>
                 <div id="svg-container"></div>
             </div>
         </div>
@@ -67,30 +67,31 @@
             </div>
 
             <div class="control-group">
-                <label for="photo-mode">写真の種類</label>
-                <select id="photo-mode">
-                    <option value="standard" selected>動物・風景（標準）</option>
-                    <option value="face">似顔絵（人の顔）</option>
+                <label for="detail-mode">内部線の抽出方式</label>
+                <select id="detail-mode">
+                    <option value="poster" selected>色の境界（ポスタリゼーション）</option>
+                    <option value="dog">明暗の境界（DoG）</option>
+                    <option value="both">両方</option>
                 </select>
             </div>
 
             <div class="control-group">
                 <label>
-                    <input type="checkbox" id="toggle-bin-preview" checked>
-                    左に白黒2色のプレビューを表示
+                    <input type="checkbox" id="toggle-depth">
+                    立体の境界を追加（奥行き推定・初回27MB）
                 </label>
-            </div>
-
-            <div class="slider-row">
-                <label for="slider-threshold">しきい値（明るさ）</label>
-                <input type="range" id="slider-threshold" min="1" max="254" step="1" value="128">
-                <span id="val-threshold">128</span>
             </div>
 
             <div class="slider-row">
                 <label for="slider-simplify">単純化</label>
                 <input type="range" id="slider-simplify" min="1" max="10" step="1" value="5">
                 <span id="val-simplify">5</span>
+            </div>
+
+            <div class="slider-row">
+                <label for="slider-detail">内部線の量</label>
+                <input type="range" id="slider-detail" min="0" max="10" step="1" value="4">
+                <span id="val-detail">4</span>
             </div>
 
             <div class="slider-row">
@@ -129,7 +130,7 @@
         <div class="button-group">
             <button id="btn-download-svg">SVGダウンロード</button>
             <button id="btn-download-png">PNGダウンロード</button>
-            <button id="btn-anim-svg">アニメーションSVG</button>
+            <button id="btn-animate">描き順アニメーション</button>
         </div>
     </section>
 
@@ -137,7 +138,6 @@
     <footer>
         <p>針金細工 八百魚（WIRE WORK YAOUO）</p>
         <p><a href="https://yaouo.jp" target="_blank" rel="noopener noreferrer">https://yaouo.jp</a></p>
-        <p><a href="v1/">旧バージョン（輪郭抽出方式いろいろ）はこちら</a></p>
     </footer>
 
     <script type="module" src="js/main.js"></script>

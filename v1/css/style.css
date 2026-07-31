@@ -342,17 +342,3 @@ footer a:hover {
         font-size: 0.9rem;
     }
 }
-
-/* プレビュー横の小ボタン */
-.small-btn {
-  font-size: 0.75rem;
-  padding: 4px 10px;
-  margin-left: 10px;
-  background: #b87333;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  vertical-align: middle;
-}
-.small-btn:hover { background: #9c5f28; }

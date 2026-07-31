@@ -1,10 +1,11 @@
 // main.js — UI制御・パイプライン統括
 import { loadModel, segmentSubject } from './segment.js';
-import { maskOutline } from './edge.js';
-import { binarize, thresholdEdges } from './threshold.js';
+import { detectEdges, maskOutline } from './edge.js';
+import { posterizeEdges } from './posterize.js';
+import { computeDepth, depthEdges } from './depth.js';
 import { vectorize } from './vectorize.js';
 import { makeOneStroke } from './onestroke.js';
-import { buildSVG, buildAnimatedSVG, downloadText, svgToPngBlob, animate } from './render.js';
+import { buildSVG, downloadText, svgToPngBlob, animate } from './render.js';
 
 const MAX_SIDE = 1024;
 
@@ -16,14 +17,14 @@ const els = {
   svgContainer: $('svg-container'),
   toggleCutout: $('toggle-cutout'),
   modelSelect: $('model-select'),
-  photoMode: $('photo-mode'),
-  toggleBinPreview: $('toggle-bin-preview'),
+  detailMode: $('detail-mode'),
+  toggleDepth: $('toggle-depth'),
   toggleBridges: $('toggle-bridges'),
-  sliderThreshold: $('slider-threshold'),
   sliderSimplify: $('slider-simplify'),
+  sliderDetail: $('slider-detail'),
   sliderThickness: $('slider-thickness'),
-  valThreshold: $('val-threshold'),
   valSimplify: $('val-simplify'),
+  valDetail: $('val-detail'),
   valThickness: $('val-thickness'),
   inputWidthCm: $('input-width-cm'),
   inputMargin: $('input-margin'),
@@ -31,7 +32,6 @@ const els = {
   strokeInfo: $('stroke-info'),
   btnSvg: $('btn-download-svg'),
   btnPng: $('btn-download-png'),
-  btnAnimSvg: $('btn-anim-svg'),
   btnAnimate: $('btn-animate'),
   status: $('status'),
 };
@@ -40,7 +40,7 @@ const state = {
   canvas: null,      // 作業キャンバス（長辺 MAX_SIDE 以下）
   imageData: null,
   mask: null,        // Uint8Array | null
-  bin: null,         // 二値化マップ（プレビュー用に保持）
+  depth: null,       // Float32Array | null（画像ごとに1回だけ計算）
   stroke: null,      // makeOneStroke の結果
   svg: '',
   busy: false,
@@ -70,7 +70,7 @@ function acceptFile(file) {
     canvas.getContext('2d').drawImage(img, 0, 0, W, H);
     state.canvas = canvas;
     state.imageData = canvas.getContext('2d').getImageData(0, 0, W, H);
-    state.bin = null;
+    state.depth = null;
 
     els.canvasOriginal.width = W;
     els.canvasOriginal.height = H;
@@ -95,6 +95,7 @@ async function runSegmentationAndProcess() {
     } else {
       state.mask = null;
     }
+    await ensureDepth();
     reprocess();
   } catch (e) {
     console.error(e);
@@ -104,18 +105,33 @@ async function runSegmentationAndProcess() {
   }
 }
 
+// 奥行きマップは画像ごとに1回だけ計算してキャッシュする
+async function ensureDepth() {
+  if (!els.toggleDepth.checked || state.depth || !state.canvas) return;
+  setStatus('奥行きを推定しています…（初回は27MBの読み込みがあります）');
+  try {
+    state.depth = await computeDepth(state.canvas);
+  } catch (e) {
+    console.error(e);
+    setStatus('奥行き推定に失敗しました。「立体の境界」をオフにして続行します', true);
+    els.toggleDepth.checked = false;
+  }
+}
+
 // ───────── パイプライン（スライダー変更で再実行） ─────────
 
 function params() {
   const simplify = Number(els.sliderSimplify.value);   // 1..10
-  const threshold = Number(els.sliderThreshold.value); // 1..254
+  const detail = Number(els.sliderDetail.value);       // 0..10
   const thickness = Number(els.sliderThickness.value); // 1..8
   return {
     epsilon: 0.6 * simplify,
     minLength: 6 + simplify * 2,
     snapRadius: 4 + simplify,
     smoothing: 2,
-    threshold,
+    dogThreshold: 10 - detail * 0.9, // 小さいほど内部線が増える
+    posterLevels: Math.min(8, 2 + Math.round(detail * 0.6)), // 色数 2〜8
+    detail,
     thickness,
   };
 }
@@ -126,18 +142,32 @@ function reprocess() {
   const p = params();
   const { width: W, height: H } = state.imageData;
 
-  // しきい値で白黒2色化 → その境界を線として拾う
-  state.bin = binarize(state.imageData, {
-    threshold: p.threshold,
-    mode: els.photoMode.value, // 'standard' | 'face'
-    mask: state.mask,
-  });
-  const edges = thresholdEdges(state.bin, W, H, { mask: state.mask });
+  const edges = new Uint8Array(W * H);
+  const mode = els.detailMode.value; // 'poster' | 'dog' | 'both'
+  if (p.detail > 0 && (mode === 'dog' || mode === 'both')) {
+    const dog = detectEdges(state.imageData, {
+      sigma: 1.4,
+      k: 1.6,
+      threshold: p.dogThreshold,
+      mask: state.mask,
+    });
+    for (let i = 0; i < edges.length; i++) if (dog[i]) edges[i] = 255;
+  }
+  if (p.detail > 0 && (mode === 'poster' || mode === 'both')) {
+    const poster = posterizeEdges(state.imageData, {
+      levels: p.posterLevels,
+      mask: state.mask,
+    });
+    for (let i = 0; i < edges.length; i++) if (poster[i]) edges[i] = 255;
+  }
+  if (els.toggleDepth.checked && state.depth) {
+    const dep = depthEdges(state.depth, W, H, { threshold: 0.04, mask: state.mask });
+    for (let i = 0; i < edges.length; i++) if (dep[i]) edges[i] = 255;
+  }
   if (state.mask) {
     const outline = maskOutline(state.mask, W, H);
     for (let i = 0; i < edges.length; i++) if (outline[i]) edges[i] = 255;
   }
-  drawBinPreview();
 
   let polylines = vectorize(edges, W, H, {
     epsilon: p.epsilon,
@@ -213,31 +243,9 @@ function debounce(fn, ms) {
 const reprocessDebounced = debounce(reprocess, 200);
 
 function updateSliderLabels() {
-  els.valThreshold.textContent = els.sliderThreshold.value;
   els.valSimplify.textContent = els.sliderSimplify.value;
+  els.valDetail.textContent = els.sliderDetail.value;
   els.valThickness.textContent = els.sliderThickness.value;
-}
-
-// 元写真キャンバスに白黒2色プレビューを重ねる（チェックオフなら元写真に戻す）
-function drawBinPreview() {
-  if (!state.canvas) return;
-  const ctx = els.canvasOriginal.getContext('2d');
-  if (!els.toggleBinPreview.checked || !state.bin) {
-    ctx.drawImage(state.canvas, 0, 0);
-    return;
-  }
-  const { width: W, height: H } = state.imageData;
-  const img = ctx.createImageData(W, H);
-  for (let i = 0; i < W * H; i++) {
-    let v;
-    if (state.mask && state.mask[i] === 0) v = 210;      // マスク外はグレー
-    else v = state.bin[i] ? 30 : 255;                     // 暗部=黒、明部=白
-    img.data[i * 4] = v;
-    img.data[i * 4 + 1] = v;
-    img.data[i * 4 + 2] = v;
-    img.data[i * 4 + 3] = 255;
-  }
-  ctx.putImageData(img, 0, 0);
 }
 
 function init() {
@@ -254,15 +262,18 @@ function init() {
     acceptFile(e.dataTransfer.files[0]);
   });
 
-  for (const s of [els.sliderSimplify, els.sliderThreshold]) {
+  for (const s of [els.sliderSimplify, els.sliderDetail]) {
     s.addEventListener('input', () => { updateSliderLabels(); reprocessDebounced(); });
   }
   els.sliderThickness.addEventListener('input', () => { updateSliderLabels(); redrawSVG(); });
   els.toggleBridges.addEventListener('change', redrawSVG);
   els.toggleCutout.addEventListener('change', runSegmentationAndProcess);
   els.modelSelect.addEventListener('change', runSegmentationAndProcess);
-  els.photoMode.addEventListener('change', reprocess);
-  els.toggleBinPreview.addEventListener('change', drawBinPreview);
+  els.detailMode.addEventListener('change', reprocess);
+  els.toggleDepth.addEventListener('change', async () => {
+    await ensureDepth();
+    reprocess();
+  });
   els.inputWidthCm.addEventListener('input', updateWireLength);
   els.inputMargin.addEventListener('input', updateWireLength);
 
@@ -285,16 +296,6 @@ function init() {
     // 線の長さに応じた時間（3〜12秒）
     const sec = Math.min(12, Math.max(3, state.stroke.totalLengthPx / 800));
     animate(els.svgContainer, sec);
-  });
-  els.btnAnimSvg.addEventListener('click', () => {
-    if (!state.stroke || !state.imageData) return;
-    const { width: W, height: H } = state.imageData;
-    const sec = Math.min(12, Math.max(3, state.stroke.totalLengthPx / 800));
-    const svg = buildAnimatedSVG(state.stroke, W, H, {
-      strokeWidth: params().thickness,
-      durationSec: sec,
-    });
-    downloadText('photo2wire_anime.svg', svg, 'image/svg+xml');
   });
 
   updateSliderLabels();

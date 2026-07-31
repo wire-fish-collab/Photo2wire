@@ -69,31 +69,6 @@ export function buildSVG(stroke, W, H, opts = {}) {
 }
 
 /**
- * 描き順アニメーション入りのSVG文字列を生成する。
- * ブラウザで開くと線が一筆書きの順に描かれていく（CSSアニメーション内蔵、
- * ループ再生）。lengthPx はパスの全長（stroke.totalLengthPx）
- * @param {object} stroke - makeOneStroke の結果
- * @param {number} W
- * @param {number} H
- * @param {{ strokeWidth?: number, durationSec?: number }} opts
- * @returns {string}
- */
-export function buildAnimatedSVG(stroke, W, H, opts = {}) {
-  const durationSec = opts.durationSec ?? 8;
-  // つなぎ強調なしのシンプルな1本パスで出力
-  const base = buildSVG(stroke, W, H, { strokeWidth: opts.strokeWidth, showBridges: false });
-  const L = Math.ceil(stroke.totalLengthPx + 10);
-  const style = [
-    '<style>',
-    `#wire-path{stroke-dasharray:${L};stroke-dashoffset:${L};`,
-    `animation:p2w-draw ${durationSec}s linear infinite;}`,
-    '@keyframes p2w-draw{0%{stroke-dashoffset:' + L + ';}85%{stroke-dashoffset:0;}100%{stroke-dashoffset:0;}}',
-    '</style>',
-  ].join('');
-  return base.replace('</svg>', style + '</svg>');
-}
-
-/**
  * テキストをファイルとしてダウンロードする
  * @param {string} filename
  * @param {string} text
