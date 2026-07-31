@@ -1,8 +1,8 @@
 // main.js — UI制御・パイプライン統括
 import { loadModel, segmentSubject } from './segment.js';
-import { maskOutline } from './edge.js';
-import { binarize, thresholdEdges } from './threshold.js';
-import { vectorize } from './vectorize.js';
+import { maskOutline, dilateMask } from './edge.js';
+import { binarize } from './threshold.js';
+import { traceContours } from './contour.js';
 import { makeOneStroke } from './onestroke.js';
 import { buildSVG, buildAnimatedSVG, downloadText, svgToPngBlob, animate } from './render.js';
 
@@ -111,8 +111,9 @@ function params() {
   const threshold = Number(els.sliderThreshold.value); // 1..254
   const thickness = Number(els.sliderThickness.value); // 1..8
   return {
-    epsilon: 0.6 * simplify,
-    minLength: 6 + simplify * 2,
+    // Visvalingam-Whyatt: この面積(px^2)未満の凸凹を取り除く
+    epsilonArea: 0.5 + simplify * simplify * 0.4,
+    minPerimeter: 12 + simplify * 4,
     snapRadius: 4 + simplify,
     smoothing: 2,
     threshold,
@@ -126,23 +127,31 @@ function reprocess() {
   const p = params();
   const { width: W, height: H } = state.imageData;
 
-  // しきい値で白黒2色化 → その境界を線として拾う
+  // しきい値で白黒2色化 → 各ブロックの輪郭を「閉じたループ」として抽出
   state.bin = binarize(state.imageData, {
     threshold: p.threshold,
     mode: els.photoMode.value, // 'standard' | 'face'
     mask: state.mask,
   });
-  const edges = thresholdEdges(state.bin, W, H, { mask: state.mask });
-  if (state.mask) {
-    const outline = maskOutline(state.mask, W, H);
-    for (let i = 0; i < edges.length; i++) if (outline[i]) edges[i] = 255;
-  }
   drawBinPreview();
 
-  let polylines = vectorize(edges, W, H, {
-    epsilon: p.epsilon,
-    minLength: p.minLength,
-  });
+  let polylines = [];
+  let clipBand = null;
+  if (state.mask) {
+    // 被写体の外形（隙間・穴も含めて閉ループで。外形は必ず残す）
+    polylines.push(...traceContours(state.mask, W, H, {
+      epsilonArea: p.epsilonArea,
+      minPerimeter: 0,
+    }));
+    // 外形と重なる暗部輪郭は外形線に任せて除く（帯で切り分け、
+    // 内側の区間だけを外形に接続する鎖として残す）
+    clipBand = dilateMask(maskOutline(state.mask, W, H), W, H, 2);
+  }
+  polylines.push(...traceContours(state.bin, W, H, {
+    epsilonArea: p.epsilonArea,
+    minPerimeter: p.minPerimeter,
+    clipBand,
+  }));
   // 線が多すぎると一筆書き計算が破綻する（し、下絵としても使えない）ため、
   // 長い順に上限本数まで絞る
   const MAX_LINES = 400;
@@ -157,7 +166,7 @@ function reprocess() {
     polylines = polylines.slice(0, MAX_LINES);
   }
   if (polylines.length === 0) {
-    setStatus('線が検出できませんでした。「内部線の量」を上げるか「単純化」を下げてください', true);
+    setStatus('線が検出できませんでした。しきい値や単純化を調整してください', true);
     els.svgContainer.innerHTML = '';
     state.stroke = null;
     return;

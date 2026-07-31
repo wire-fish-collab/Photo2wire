@@ -151,65 +151,51 @@ class StrokeGraph {
     return comp;
   }
 
-  // 連結成分が複数あれば、近い点同士を接続線で結んで1つにする。
-  // 最大成分を核として、他の成分を「核へ最も近い点」で順に併合していく。
-  // 総当たりだと成分が多いとき O(n^2) で固まるため、空間グリッドで近傍探索する
+  // 連結成分が複数あれば、近い成分から順に接続線で結んで1つにする。
+  // 毎回サンプルを取り直すことで、辺の分割による参照ずれを起こさない。
+  // 「最大成分に最も近い成分」から併合していくので（Prim法）、
+  // 絵を横切る長いつなぎ線が生まれにくい
   connectComponents() {
-    const comp = this.components();
-    const roots = [...new Set(this.edges.flatMap((e) => [comp[e.u], comp[e.v]]))];
-    if (roots.length <= 1) return;
-
-    // 成分ごとに辺上のサンプル点を集める（約12px間隔）
-    const samples = new Map(); // root -> [{p, ei, seg, t}]
-    for (let ei = 0; ei < this.edges.length; ei++) {
-      const e = this.edges[ei];
-      const root = comp[e.u];
-      if (!samples.has(root)) samples.set(root, []);
-      const list = samples.get(root);
-      for (let i = 0; i < e.pts.length - 1; i++) {
-        const a = e.pts[i], b = e.pts[i + 1];
-        const steps = Math.max(1, Math.round(dist(a, b) / 12));
-        for (let s = 0; s <= steps; s++) {
-          const t = s / steps;
-          list.push({ p: [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], ei, seg: i, t });
+    for (let guard = 0; guard < 2000; guard++) {
+      const comp = this.components();
+      const samples = new Map(); // root -> [{p, ei, seg, t}]（約12px間隔）
+      for (let ei = 0; ei < this.edges.length; ei++) {
+        const e = this.edges[ei];
+        const root = comp[e.u];
+        if (!samples.has(root)) samples.set(root, []);
+        const list = samples.get(root);
+        for (let i = 0; i < e.pts.length - 1; i++) {
+          const a = e.pts[i], b = e.pts[i + 1];
+          const steps = Math.max(1, Math.round(dist(a, b) / 12));
+          for (let s = 0; s <= steps; s++) {
+            const t = s / steps;
+            list.push({ p: [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])], ei, seg: i, t });
+          }
         }
       }
-    }
+      if (samples.size <= 1) return;
 
-    // 核 = 最大成分。他は大きい順に核へ繋ぐ
-    roots.sort((a, b) => (samples.get(b)?.length || 0) - (samples.get(a)?.length || 0));
-    const main = roots[0];
-    const grid = new SampleGrid(48);
-    for (const s of samples.get(main)) grid.add(s);
-
-    // splitEdge で辺番号が変わるため、split 済み辺のサンプルは座標だけ頼りに
-    // 引き直す必要がある。単純化のため「分割の影響を受けた辺のサンプル」は
-    // 近傍探索の候補から除き、接続点は splitEdge が返す頂点を使う
-    const staleEdges = new Set();
-
-    for (let r = 1; r < roots.length; r++) {
-      const list = samples.get(roots[r]) || [];
-      if (list.length === 0) continue;
-      // この成分の各サンプルから核グリッドへの最近傍を探す
-      let best = null;
-      for (const sb of list) {
-        const near = grid.nearest(sb.p, staleEdges);
-        if (near && (!best || near.d < best.d)) best = { d: near.d, sa: near.s, sb };
+      let main = null;
+      for (const root of samples.keys()) {
+        if (main === null || samples.get(root).length > samples.get(main).length) main = root;
       }
-      if (!best) continue;
+      const grid = new SampleGrid(48);
+      for (const s of samples.get(main)) grid.add(s);
 
+      let best = null;
+      for (const [root, list] of samples) {
+        if (root === main) continue;
+        for (const sb of list) {
+          const near = grid.nearest(sb.p, null);
+          if (near && (!best || near.d < best.d)) best = { d: near.d, sa: near.s, sb };
+        }
+      }
+      if (!best) return;
       const pair = [best.sa, best.sb].sort((a, b) => b.ei - a.ei);
-      const before = this.edges.length;
       const w1 = this.splitEdge(pair[0].ei, pair[0].seg, pair[0].t, pair[0].p);
       const w2 = this.splitEdge(pair[1].ei, pair[1].seg, pair[1].t, pair[1].p);
-      if (this.edges.length !== before) {
-        staleEdges.add(pair[0].ei);
-        staleEdges.add(pair[1].ei);
-      }
       if (w1 !== w2) this.addEdge(w1, w2, [this.verts[w1], this.verts[w2]], 'connector');
-      // 併合した成分のサンプルも核グリッドへ（辺番号が古い可能性があるため
-      // 頂点座標としてのみ使う。ei は split の影響がなければそのまま有効）
-      for (const s of list) grid.add(s);
+      // w1===w2 の場合も頂点共有で成分は併合されるので次の反復で解消する
     }
   }
 
