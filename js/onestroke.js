@@ -287,22 +287,68 @@ class StrokeGraph {
     }
     pairs.sort((a, b) => a[0] - b[0]);
     const used = new Set();
+    const matched = [{ a: far.a, b: far.b, free: true }]; // 始点・終点ペア（往復不要）
     for (const [, a, b] of pairs) {
       if (used.has(a) || used.has(b)) continue;
       used.add(a);
       used.add(b);
-      // 針金を節約するため、長い経路を往復（二重化）するより
-      // 2点を直接短い直線で結ぶ方が十分短ければそちらを選ぶ
-      const dPath = sp.get(a).dist[b];
-      const dLine = dist(this.verts[a], this.verts[b]);
-      if (dLine < dPath * 0.7) {
-        this.addEdge(a, b, [this.verts[a], this.verts[b]], 'connector');
+      matched.push({ a, b, free: false });
+    }
+
+    // ペアの組み替えで往復総長を減らす（余分な線は一切増やさない改善）。
+    // どの2点を組にするかで二重なぞりの総量が決まるため、2組ずつ取り出して
+    // 組み替えた方が短くなるなら入れ替える。始点・終点ペア（コスト0）も
+    // 交換対象に含め、最も長い組を始点・終点に回せるようにする
+    const pairCost = (pr) => (pr.free ? 0 : sp.get(pr.a).dist[pr.b]);
+    for (let pass = 0; pass < 10; pass++) {
+      let improved = false;
+      for (let i = 0; i < matched.length; i++) {
+        for (let j = i + 1; j < matched.length; j++) {
+          const pi = matched[i], pj = matched[j];
+          const hasFree = pi.free || pj.free;
+          const current = pairCost(pi) + pairCost(pj);
+          // 2通りの組み替え。free枠は距離の長い方の組に割り当てる
+          const options = [
+            [{ a: pi.a, b: pj.a }, { a: pi.b, b: pj.b }],
+            [{ a: pi.a, b: pj.b }, { a: pi.b, b: pj.a }],
+          ];
+          for (const [q1, q2] of options) {
+            const d1 = sp.get(q1.a).dist[q1.b];
+            const d2 = sp.get(q2.a).dist[q2.b];
+            let cost;
+            if (hasFree) {
+              cost = Math.min(d1, d2); // 長い方をfreeに
+            } else {
+              cost = d1 + d2;
+            }
+            if (cost < current - 1e-6) {
+              const freeGoesTo1 = hasFree && d1 >= d2;
+              matched[i] = { ...q1, free: hasFree && freeGoesTo1 };
+              matched[j] = { ...q2, free: hasFree && !freeGoesTo1 };
+              improved = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!improved) break;
+    }
+
+    // 短い直線で直接結んだ方が針金が少なく済み、かつ写真にない長い線に
+    // ならない場合（30px以下）だけショートカットを使う。それ以外は往復
+    const SHORTCUT_MAX = 30;
+    for (const pr of matched) {
+      if (pr.free) continue;
+      const dPath = sp.get(pr.a).dist[pr.b];
+      const dLine = dist(this.verts[pr.a], this.verts[pr.b]);
+      if (dLine <= SHORTCUT_MAX && dLine < dPath * 0.7) {
+        this.addEdge(pr.a, pr.b, [this.verts[pr.a], this.verts[pr.b]], 'connector');
         continue;
       }
-      // a→b の最短経路を復元して二重化（retrace）
-      const { prevEdge, prevVert } = sp.get(a);
-      let cur = b;
-      while (cur !== a && prevEdge[cur] !== -1) {
+      // 最短経路を復元して二重化（retrace）
+      const { prevEdge, prevVert } = sp.get(pr.a);
+      let cur = pr.b;
+      while (cur !== pr.a && prevEdge[cur] !== -1) {
         const e = this.edges[prevEdge[cur]];
         this.edges.push({ u: e.u, v: e.v, pts: e.pts, len: e.len, kind: 'retrace' });
         cur = prevVert[cur];

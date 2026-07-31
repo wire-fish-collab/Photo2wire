@@ -5,17 +5,24 @@
 //
 // モード:
 //   'standard' 動物・風景: 通常の輝度で二値化
-//   'face'     似顔絵: 肌を明るく持ち上げ（ガンマ補正）、赤み（唇）を
-//              暗く残すトーンカーブを通してから二値化
+//   'face'     似顔絵: 次の3つを組み合わせて「人の目に見える顔の特徴」を残す
+//     - 強めのぼかしで細い皺の影・小さなハイライトを消す
+//     - 「絶対的に暗い」（髪・瞳）と「周囲の肌より局所的に暗い」（薄い眉・
+//       鼻の影など）の2つの判定を併用。広い影は周囲ごと暗いので拾われない
+//     - 赤み（唇）を暗く残す
 
 import { maskOutline, dilateMask } from './edge.js';
+import { boxBlurLarge } from './posterize.js';
 
 // 似顔絵モードの調整定数
-const FACE_GAMMA = 0.65;   // 小さいほど肌（中間調）が明るく持ち上がる
-const LIP_CR_BASE = 140;   // これを超える赤み（Cr）を暗くする
-const LIP_DARKEN = 2.2;    // 赤みを暗くする強さ
+const FACE_PREBLUR = 3.5;      // 顔用の強めのぼかし（皺の影を消す）
+const FACE_ABS_GAMMA = 0.6;    // 絶対的な暗さの判定（小さいほど本当に暗い所だけ拾う）
+const FACE_LOCAL_GAMMA = 1.15; // 局所的な暗さの判定の効き方
+const FACE_LOCAL_GAIN = 1.35;  // 局所判定の全体の明るさ（大きいほど拾いにくい）
+const LIP_CR_BASE = 140;       // これを超える赤み（Cr）を暗くする
+const LIP_DARKEN = 2.2;        // 赤みを暗くする強さ
 
-const BLUR_SIGMA = 1.5;        // 二値化前のノイズ除去ぼかし
+const BLUR_SIGMA = 1.5;        // 標準モードの二値化前ノイズ除去ぼかし
 const MIN_SPECK_FRAC = 0.0008; // これ未満の白/黒の斑点は反転して消す
 
 /**
@@ -31,26 +38,19 @@ export function binarize(imageData, opts = {}) {
   const { data, width: W, height: H } = imageData;
   const N = W * H;
 
-  // モードに応じたグレースケール値
-  const gray = new Float32Array(N);
-  for (let i = 0; i < N; i++) {
-    const b = i * 4;
-    const r = data[b], g = data[b + 1], bl = data[b + 2];
-    const y = 0.299 * r + 0.587 * g + 0.114 * bl;
-    if (mode === 'face') {
-      // 肌を明るく（ガンマ補正）
-      let v = 255 * Math.pow(y / 255, FACE_GAMMA);
-      // 赤み（唇など）は暗く残す
-      const cr = 128 + (r - y) * 0.713;
-      v -= Math.max(0, cr - LIP_CR_BASE) * LIP_DARKEN;
-      gray[i] = Math.max(0, Math.min(255, v));
-    } else {
-      gray[i] = y;
+  // モードに応じたグレースケール値（faceGray は内部でぼかし済み）
+  let blurred;
+  if (mode === 'face') {
+    blurred = faceGray(data, W, H, mask);
+  } else {
+    const gray = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const b = i * 4;
+      gray[i] = 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
     }
+    // 軽いぼかしでノイズを抑える
+    blurred = blurSep(gray, W, H, gaussKernel(BLUR_SIGMA));
   }
-
-  // 軽いぼかしでノイズを抑える
-  const blurred = blurSep(gray, W, H, gaussKernel(BLUR_SIGMA));
 
   const bin = new Uint8Array(N);
   for (let i = 0; i < N; i++) {
@@ -111,6 +111,51 @@ export function thresholdEdges(bin, W, H, opts = {}) {
     for (let i = 0; i < N; i++) if (band[i]) boundary[i] = 0;
   }
   return boundary;
+}
+
+// 似顔絵用のグレースケール:
+//   yAbs   = 絶対的な暗さ（緩いガンマ。髪・瞳など本当に暗い所だけ暗く残る）
+//   yLocal = 周囲（大きな窓の局所平均）と比べた暗さ。薄い眉・鼻の影など
+//            「肌より少し暗い特徴」を拾う。広い影は周囲ごと暗いため
+//            比が1に近く、拾われない（Retinex的な照明打ち消し）
+//   仕上がり = min(yAbs, yLocal) から赤み（唇）分を引いたもの
+function faceGray(data, W, H, mask) {
+  const N = W * H;
+  const Y = new Float32Array(N);
+  const CR = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const b = i * 4;
+    const y = 0.299 * data[b] + 0.587 * data[b + 1] + 0.114 * data[b + 2];
+    Y[i] = y;
+    CR[i] = 128 + (data[b] - y) * 0.713;
+  }
+  // 強めのぼかしで細い皺の影・小さなハイライトを消す
+  const ysm = blurSep(Y, W, H, gaussKernel(FACE_PREBLUR));
+
+  // マスク対応の大きな局所平均（背景の明るさが滲み込まないよう正規化）
+  const radius = Math.max(24, Math.round(Math.min(W, H) / 10));
+  const m = new Float32Array(N);
+  if (mask) {
+    for (let i = 0; i < N; i++) m[i] = mask[i] ? 1 : 0;
+  } else {
+    m.fill(1);
+  }
+  const ym = new Float32Array(N);
+  for (let i = 0; i < N; i++) ym[i] = ysm[i] * m[i];
+  const avgNum = boxBlurLarge(ym, W, H, radius);
+  const avgDen = boxBlurLarge(m, W, H, radius);
+
+  const out = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const avg = avgDen[i] > 1e-6 ? avgNum[i] / avgDen[i] : ysm[i];
+    const yAbs = 255 * Math.pow(ysm[i] / 255, FACE_ABS_GAMMA);
+    const ratio = Math.max(0, Math.min(2, (ysm[i] + 4) / (avg + 4)));
+    const yLocal = FACE_LOCAL_GAIN * 255 * Math.pow(ratio * 0.5, FACE_LOCAL_GAMMA);
+    let v = Math.min(yAbs, yLocal);
+    v -= Math.max(0, CR[i] - LIP_CR_BASE) * LIP_DARKEN;
+    out[i] = Math.max(0, Math.min(255, v));
+  }
+  return out;
 }
 
 // 面積が MIN_SPECK_FRAC 未満の連結成分（4近傍・同値）を反転して消す

@@ -266,7 +266,7 @@ function gaussKernel(sigma) {
 }
 
 // 大半径用の高速ボックスぼかし（累積和方式・2回反復でガウシアン近似）
-function boxBlurLarge(src, W, H, radius, iters = 2) {
+export function boxBlurLarge(src, W, H, radius, iters = 2) {
   let cur = Float32Array.from(src);
   for (let it = 0; it < iters; it++) {
     const tmp = new Float32Array(W * H);

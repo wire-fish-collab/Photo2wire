@@ -152,20 +152,29 @@ function params() {
   };
 }
 
-// 前回の処理が重かった場合はスピナーを描画してから実行する
+// 処理は段階に分け、開始から一定時間を超えたらスピナーを描画してから
+// 続きを実行する（速く終わる場合はスピナーを出さない）
 function reprocess() {
   if (!state.imageData) return;
-  if (state.lastProcessMs > 300) {
-    showSpinner();
-    setTimeout(doProcess, 40);
-  } else {
-    doProcess();
-  }
+  state.runId = (state.runId ?? 0) + 1;
+  doProcess(state.runId);
 }
 
-function doProcess() {
+async function doProcess(runId) {
   if (!state.imageData) return;
   const t0 = performance.now();
+  let spinnerShown = false;
+  // 段階の合間に呼ぶ。経過時間が閾値を超えていたらスピナーを描画してから
+  // 続行する。新しい実行が始まっていたら false を返して中断させる
+  const checkpoint = async (force = false) => {
+    if (state.runId !== runId) return false;
+    if (!spinnerShown && (force || performance.now() - t0 > 120)) {
+      showSpinner();
+      spinnerShown = true;
+      await new Promise((r) => setTimeout(r, 35)); // スピナーを描画させる
+    }
+    return state.runId === runId;
+  };
   const p = params();
   const { width: W, height: H } = state.imageData;
 
@@ -176,6 +185,7 @@ function doProcess() {
     mask: state.mask,
   });
   drawBinPreview();
+  if (!(await checkpoint())) return;
 
   let polylines = [];
   let clipBand = null;
@@ -222,10 +232,13 @@ function doProcess() {
     state.stroke = null;
     return;
   }
+  // 一筆書き化は線が多いと重くなるので、その前にもスピナーを出す機会を作る
+  if (!(await checkpoint(polylines.length > 60))) return;
   state.stroke = makeOneStroke(polylines, {
     snapRadius: p.snapRadius,
     smoothing: p.smoothing,
   });
+  if (state.runId !== runId) return;
   redrawSVG();
   updateWireLength();
 
